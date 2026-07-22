@@ -7,7 +7,8 @@ and iliria one usable product.**
 
 trailbrake (dense Qwen3-32B-4bit, ~15-25 tok/s, being pruned
 into a fast NO-THINK coding specialist) is the fast default. iliria
-(GLM-5.2, 744B MoE, ~1.6 tok/s streamed, in `iliria/c`) is the
+(GLM-5.2, 744B MoE, ~1.5 tok/s warm and isolated, and measured at 0.2 tok/s
+under GPU contention, in `iliria/c`) is the
 deep-reasoning escalation for the hard minority of requests. Both already
 speak an OpenAI-compatible HTTP API. This router is a thin, dependency-free
 proxy in front of both: one endpoint, a pluggable escalation policy that
