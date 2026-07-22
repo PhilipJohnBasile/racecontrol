@@ -22,10 +22,12 @@ servers showed (`trailbrake/src/mlx_engine/server.py`,
     single flat request timeout would be actively wrong against iliria: at
     ~1.6 tok/s a legitimate 1024-token escalation can take minutes end to
     end, but the router must still fail fast if the connection goes truly
-    silent. `http.client.HTTPResponse.read(n)` on a chunked response already
-    de-chunks incrementally, so a bounded `read_chunk` loop naturally waits
-    only as long as `idle_timeout_s` between arrivals, never for the whole
-    body -- see docs/DESIGN.md, "Why two timeouts."
+    silent. `read_chunk` therefore uses `HTTPResponse.read1(n)`, which returns
+    whatever a single underlying read yields, so the loop waits only as long as
+    `idle_timeout_s` between arrivals, never for the whole body -- see
+    docs/DESIGN.md, "Why two timeouts." (`read(n)` is NOT interchangeable here:
+    on a chunked body it blocks until it has n bytes or the body ends, which
+    buffers any sub-`size` SSE response in full and defeats streaming.)
 """
 
 from __future__ import annotations
@@ -89,7 +91,15 @@ class _HttpOpenResponse:
         self.headers = {key.lower(): value for key, value in response.getheaders()}
 
     def read_chunk(self, size: int = 65536) -> bytes:
-        return self._response.read(size)
+        # `read1`, NOT `read`. `HTTPResponse.read(n)` on a chunked body keeps pulling
+        # chunks until it has collected n bytes or the body ends, so every SSE response
+        # smaller than `size` was buffered IN FULL before the router relayed a single
+        # byte -- silently turning a streamed response into one delivery at the end
+        # (measured through the router: TTFT == total, e.g. 1.272s/1.272s, against a
+        # normal 0.228s/1.946s split talking to the same backend directly).
+        # `read1(n)` returns whatever a single underlying read yields, which is what this
+        # module's "waits only as long as idle_timeout_s between arrivals" always meant.
+        return self._response.read1(size)
 
     def close(self) -> None:
         self._connection.close()

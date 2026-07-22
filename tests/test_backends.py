@@ -5,6 +5,7 @@ import unittest
 
 from router.backends import (
     BackendClient,
+    _HttpOpenResponse,
     drain,
     classify_prompt_kind,
     estimate_prompt_tokens,
@@ -441,6 +442,40 @@ class PromptKindClassificationTests(unittest.TestCase):
             {"role": "assistant", "content": "Sure, here is an overview."},
         )
         self.assertEqual(classify_prompt_kind(messages), "unknown")
+
+
+class ReadChunkStreamingTests(unittest.TestCase):
+    """`read_chunk` must relay whatever has arrived, not wait for `size` bytes.
+
+    `http.client.HTTPResponse.read(n)` on a chunked body keeps pulling chunks until it has
+    collected n bytes or the body ends. With the default 65536 `size`, that buffered every
+    SSE response smaller than 64 KB in full before the router relayed a single byte --
+    streaming through the router silently became one delivery at the very end (measured:
+    TTFT == total, 1.272s/1.272s, vs a normal 0.228s/1.946s split against the same backend
+    directly). `read1(n)` returns what a single underlying read yields, which is what the
+    module's "waits only as long as idle_timeout_s between arrivals" contract always meant.
+    """
+
+    class _Response:
+        status = 200
+
+        def getheaders(self):
+            return [("Content-Type", "text/event-stream")]
+
+        def read(self, size):  # the blocking, whole-body path
+            return b"ENTIRE-BODY-BUFFERED"
+
+        def read1(self, size):  # the incremental path
+            return b"first-chunk"
+
+    def test_read_chunk_relays_incrementally(self):
+        opened = _HttpOpenResponse(object(), self._Response())
+        self.assertEqual(
+            opened.read_chunk(65536),
+            b"first-chunk",
+            "read_chunk must use read1; read() blocks until `size` bytes or end-of-body, "
+            "which buffers a whole sub-64KB SSE response and defeats streaming",
+        )
 
 
 if __name__ == "__main__":
