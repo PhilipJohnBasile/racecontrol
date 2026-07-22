@@ -592,6 +592,51 @@ per backend, decision counts by `tier:backend:status`) for a quick check
 without tailing the JSONL file; it is allowed to reset across a restart
 (the file is the durable record).
 
+### The decision-groundtruth contract
+
+The measured death of trigger 3 (§4) left one credible replacement path: a
+small learned classifier trained on *real* traffic. That requires two
+things this log did not originally carry -- features for every request, and
+a labeling rule -- and this section is the contract for both, so routing
+claims stop being blocked on "we never logged the evidence."
+
+**Features (logged now, on every request).** `policy.escalation_features`
+runs once per client request in `dispatch._run` and its fields are merged
+under every `DecisionRecord` that request produces, on *every* trigger
+path -- overrides and explicit markers included, because those rows arrive
+pre-labeled (the caller told us the right tier) and labels are worthless
+without the features that accompanied them. Fields: `hardness_score` (the
+v0 signal, logged even though it is inert at the default threshold),
+`hard_hits`/`easy_hits` (pattern indices on the latest user turn),
+`patterns_version` (short hash keeping those indices interpretable across
+future table edits), `prompt_fingerprint` (sha256-16 of the latest user
+text, lowercased, whitespace-collapsed, configured markers stripped
+*before* hashing), `had_marker`, `latest_chars`, `user_turns`. Privacy: no
+prompt text is logged -- hash, indices, and sizes only.
+
+**Labels (derived offline; nothing here grades itself).**
+- *Re-ask escalation = a labeled miss.* The marker-stripped fingerprint is
+  the join key: a `tier=fast, trigger=default` row followed within a short
+  window by the same fingerprint with `had_marker=true` means the fast
+  answer wasn't good enough and the user said so by re-asking. This is the
+  highest-value label and it costs zero interaction -- it falls out of
+  normal usage.
+- *Override and marker rows = direct labels.* `trigger=manual_override` or
+  `explicit_marker` is the caller stating the correct tier outright.
+- *Unrepeated fast answers = weak negatives.* A fast-tier row whose
+  fingerprint never recurs with a marker is weak evidence "fast was
+  enough" -- weak because silence also means the user gave up or wandered
+  off; weight accordingly, never treat as ground truth.
+- *`reason` strings are display, not features.* Parse nothing out of them;
+  every machine-readable fact has its own field.
+
+**The bar (unchanged by any of this).** Whatever gets trained on these
+rows faces `bench/escalation_eval/` plus a *fresh* holdout, per that
+directory's RESULTS.md -- the committed set stops being a valid test the
+moment something is tuned against it. And single-operator traffic is the
+deployment distribution for a local stack -- honest telemetry, unlike
+canary rows (`canary=true`), which remain excluded from any training set.
+
 ### Security posture (reused, not re-derived)
 
 The router is one more attacker-reachable stdlib `http.server` process in

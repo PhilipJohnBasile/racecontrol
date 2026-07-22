@@ -1326,6 +1326,55 @@ class ConflictingRoutingSignalTests(unittest.TestCase):
             harness.close()
 
 
+class EscalationFeatureLoggingTests(unittest.TestCase):
+    """Every DecisionRecord must carry the groundtruth-contract features
+    (policy.escalation_features via dispatch._run) -- on every trigger path,
+    since override/marker rows are the pre-labeled training examples."""
+
+    def setUp(self):
+        backends = (
+            _backend(id="trailbrake-baseline", tier="fast"),
+            _backend(id="iliria", tier="deep", model_id="glm-5.2-iliria", rollback_target=True),
+        )
+        self.harness = _Harness(backends, fallback={"fast": "deep", "deep": "fast"})
+
+    def tearDown(self):
+        self.harness.close()
+
+    def test_default_path_logs_features(self):
+        self.harness.transports["trailbrake-baseline"].queue_response(200, chat_response_body("hi"))
+        self.harness.router.dispatch_chat({"messages": [{"role": "user", "content": "explain the borrow checker"}]})
+        (record,) = self.harness.log_lines()
+        for field in ("hardness_score", "hard_hits", "easy_hits", "patterns_version",
+                      "prompt_fingerprint", "had_marker", "latest_chars", "user_turns"):
+            self.assertIn(field, record)
+        self.assertEqual(record["trigger"], "default")
+        self.assertFalse(record["had_marker"])
+
+    def test_marker_escalation_logs_features_with_had_marker(self):
+        # The labeled-example path: same prompt shape, explicit marker. The
+        # fingerprint must match the unmarked form (the offline join key)
+        # and had_marker must record the label.
+        self.harness.transports["iliria"].queue_response(200, chat_response_body("deep"))
+        self.harness.router.dispatch_chat({"messages": [{"role": "user", "content": "#deep explain the borrow checker"}]})
+        (record,) = self.harness.log_lines()
+        self.assertEqual(record["trigger"], "explicit_marker")
+        self.assertTrue(record["had_marker"])
+        from router.policy import escalation_features
+        plain = escalation_features(
+            [{"role": "user", "content": "explain the borrow checker"}],
+            self.harness.config.escalation.hard_markers,
+        )
+        self.assertEqual(record["prompt_fingerprint"], plain["prompt_fingerprint"])
+
+    def test_no_prompt_text_reaches_the_log(self):
+        secret = "hunter2-super-secret-payload"
+        self.harness.transports["trailbrake-baseline"].queue_response(200, chat_response_body("ok"))
+        self.harness.router.dispatch_chat({"messages": [{"role": "user", "content": f"summarize {secret}"}]})
+        raw = Path(self.harness.config.server.log_path).read_text()
+        self.assertNotIn(secret, raw)
+
+
 class OversizedSignalTests(unittest.TestCase):
     def setUp(self):
         backends = (

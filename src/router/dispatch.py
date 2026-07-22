@@ -40,7 +40,7 @@ from .backends import (
 from .circuit import CircuitBreakerRegistry
 from .config import BackendConfig, RouterConfig
 from .errors import BackendRequestFailed, NoBackendAvailable
-from .policy import EscalationPolicy, RoutingDecision
+from .policy import EscalationPolicy, RoutingDecision, escalation_features
 from .telemetry import DecisionLogger, DecisionRecord, new_request_id, utc_now_iso
 
 
@@ -416,6 +416,15 @@ class RequestRouter:
             else None
         )
 
+        # Escalation evidence for the groundtruth contract (docs/DESIGN.md):
+        # computed ONCE per client request from the ORIGINAL body, then merged
+        # under every DecisionRecord this call logs -- every trigger path,
+        # including manual overrides and markers, because those are the rows
+        # that arrive pre-labeled. Hash/indices only, never prompt text.
+        features = escalation_features(
+            request_body.get("messages") or [], self.config.escalation.hard_markers
+        )
+
         for _ in range(self.MAX_ATTEMPTS):
             excluded = self.circuit_breakers.excluded_backend_ids(self._candidate_ids_for_tier(tier)) | tried
             backend, length_routing_extra = self._select_backend(
@@ -426,6 +435,9 @@ class RequestRouter:
                 estimated_tokens=estimated_tokens,
                 prompt_kind=prompt_kind,
             )
+            # Features ride under the per-attempt extra so every _log site in
+            # this loop (and the stream finalizer's floor) carries them.
+            length_routing_extra = {**features, **length_routing_extra}
 
             if backend is None:
                 fallback_tier = self.config.fallback.get(tier)

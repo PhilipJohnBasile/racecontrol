@@ -8,6 +8,7 @@ from router.policy import (
     DefaultPolicy,
     DraftThenEscalatePolicy,
     build_policy,
+    escalation_features,
     find_hard_marker,
     hardness_score,
     resolve_manual_override,
@@ -382,6 +383,51 @@ class BuildPolicyTests(unittest.TestCase):
     def test_draft_then_escalate_disabled_by_default(self):
         policy = build_policy(_config())
         self.assertNotIsInstance(policy, DraftThenEscalatePolicy)
+
+
+
+
+class EscalationFeaturesTests(unittest.TestCase):
+    """The groundtruth contract's feature side (policy.escalation_features):
+    these fields feed every DecisionRecord, so their shapes are load-bearing
+    for the offline labeler documented in docs/DESIGN.md."""
+
+    def test_marker_stripped_fingerprint_is_the_reask_join_key(self):
+        # "same prompt, now with #deep" must collide with the original --
+        # that collision IS the free miss-label. had_marker still tells the
+        # two rows apart.
+        plain = escalation_features(_messages("explain the borrow checker"), ("#deep", "#reason"))
+        marked = escalation_features(_messages("#deep explain the borrow checker"), ("#deep", "#reason"))
+        self.assertEqual(plain["prompt_fingerprint"], marked["prompt_fingerprint"])
+        self.assertFalse(plain["had_marker"])
+        self.assertTrue(marked["had_marker"])
+
+    def test_fingerprint_normalizes_case_and_whitespace_but_not_content(self):
+        a = escalation_features(_messages("Explain   the CAP\ntheorem"), ())
+        b = escalation_features(_messages("explain the cap theorem"), ())
+        c = escalation_features(_messages("explain the bap theorem"), ())
+        self.assertEqual(a["prompt_fingerprint"], b["prompt_fingerprint"])
+        self.assertNotEqual(a["prompt_fingerprint"], c["prompt_fingerprint"])
+
+    def test_score_matches_hardness_score_and_hits_index_the_tables(self):
+        msgs = _messages("There is a deadlock in the pool. Write a test for it.")
+        features = escalation_features(msgs, ())
+        self.assertEqual(features["hardness_score"], round(hardness_score(msgs), 3))
+        # index 1 of the hard table is the named concurrency/memory failure
+        # row (deadlock); index 2 of the easy table is "write a test for".
+        self.assertIn(1, features["hard_hits"])
+        self.assertIn(2, features["easy_hits"])
+
+    def test_patterns_version_is_stable_within_a_process(self):
+        v1 = escalation_features(_messages("anything"), ())["patterns_version"]
+        v2 = escalation_features(_messages("something else"), ())["patterns_version"]
+        self.assertEqual(v1, v2)
+        self.assertRegex(v1, r"^[0-9a-f]{8}$")
+
+    def test_no_prompt_text_in_output(self):
+        secret = "hunter2-super-secret-payload"
+        features = escalation_features(_messages(f"why does {secret} crash intermittently"), ())
+        self.assertNotIn(secret, str(features))
 
 
 if __name__ == "__main__":

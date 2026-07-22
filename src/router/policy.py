@@ -35,6 +35,7 @@ is transparently re-run on iliria). It ships disabled
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
@@ -89,6 +90,18 @@ _EASY_SIGNAL_PATTERNS: tuple[tuple[re.Pattern[str], float], ...] = (
     (re.compile(r"\bfix (the )?typo\b|\bformat(ting)?\b|\blint\b", re.I), -0.3),
     (re.compile(r"\bwrite a (unit )?test for\b", re.I), -0.2),
 )
+
+# Short content hash over both tables (patterns + weights + floors), logged
+# beside every `escalation_features` row -- so the `hard_hits`/`easy_hits`
+# indices in old log lines stay interpretable after the tables change: an
+# offline reader maps indices back to patterns via the source at whichever
+# version stamped the row. Computed once at import; NOT a config knob.
+_PATTERNS_VERSION = hashlib.sha256(
+    repr(
+        [(p.pattern, w, f) for p, w, f in _HARD_SIGNAL_PATTERNS]
+        + [(p.pattern, w) for p, w in _EASY_SIGNAL_PATTERNS]
+    ).encode()
+).hexdigest()[:8]
 
 # How many of the most recent user turns feed `hardness_score`, and how much
 # an older turn's contribution shrinks per turn of distance from the current
@@ -223,6 +236,53 @@ def find_hard_marker(messages: list, markers: tuple[str, ...]) -> str | None:
         if marker and re.search(rf"(?<!\w){re.escape(marker)}(?!\w)", text):
             return marker
     return None
+
+
+def escalation_features(messages: list, markers: tuple[str, ...] = ()) -> dict:
+    """Per-request escalation evidence for the decision log -- the
+    groundtruth contract's feature side (docs/DESIGN.md, "The
+    decision-groundtruth contract"). Logged for EVERY request, whatever
+    trigger actually decided it: a manual override or explicit marker is a
+    *labeled* example (the caller told us the right tier), and those labels
+    are worthless without the features that accompanied them.
+
+    Privacy: no prompt text leaves this function -- only the score, pattern
+    hit indices, lengths, and a one-way fingerprint.
+
+    - `hardness_score`: exactly `hardness_score(messages)`, the number the
+      heuristic compares against the threshold. Logged even though the
+      heuristic is inert at the default threshold (bench/escalation_eval/):
+      a future learned classifier needs the v0 signal as a baseline feature.
+    - `hard_hits` / `easy_hits`: indices into `_HARD_SIGNAL_PATTERNS` /
+      `_EASY_SIGNAL_PATTERNS` that matched the LATEST user turn. Indices,
+      not pattern strings, to keep rows small; `patterns_version` makes them
+      interpretable after future table edits.
+    - `prompt_fingerprint`: sha256 (first 16 hex) of the latest user text,
+      lowercased, whitespace-collapsed, with configured markers stripped
+      FIRST -- so "explain X" and "#deep explain X" collide on purpose.
+      That collision is the offline labeler's join key: a fast-tier answer
+      followed shortly by the same fingerprint carrying a marker is a
+      labeled miss, no human annotation needed.
+    - `had_marker`: whether a configured marker was present (the stripped
+      fingerprint no longer shows it).
+    - `latest_chars` / `user_turns`: cheap size features.
+    """
+    latest = _last_user_text(messages)
+    stripped = latest
+    for marker in markers:
+        if marker:
+            stripped = re.sub(rf"(?<!\w){re.escape(marker)}(?!\w)", " ", stripped)
+    normalized = " ".join(stripped.lower().split())
+    return {
+        "hardness_score": round(hardness_score(messages), 3),
+        "hard_hits": [i for i, (pattern, _, _) in enumerate(_HARD_SIGNAL_PATTERNS) if pattern.search(latest)],
+        "easy_hits": [i for i, (pattern, _) in enumerate(_EASY_SIGNAL_PATTERNS) if pattern.search(latest)],
+        "patterns_version": _PATTERNS_VERSION,
+        "prompt_fingerprint": hashlib.sha256(normalized.encode()).hexdigest()[:16],
+        "had_marker": find_hard_marker(messages, markers) is not None,
+        "latest_chars": len(latest),
+        "user_turns": sum(1 for m in messages if isinstance(m, dict) and m.get("role") == "user"),
+    }
 
 
 def resolve_manual_override(request: dict, config: RouterConfig) -> RoutingDecision | None:
