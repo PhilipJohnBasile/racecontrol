@@ -409,6 +409,24 @@ class RouterHandler(BaseHTTPRequestHandler):
 
     def _handle_chat(self, body: dict) -> None:
         router = self.server.router
+        # `messages`, when present, must be a list -- policy.py/backends.py's
+        # message-walking helpers (_recent_user_texts et al.) accept the two
+        # shapes the chat API actually allows content-wise, but they still
+        # assume the top-level `messages` container itself is iterable in a
+        # `reversed()`-compatible way. A client that sends e.g. `"messages":
+        # 42` (a plausible client-side bug, not just an adversarial input)
+        # would otherwise reach `reversed(42)` deep inside `policy.decide`
+        # and crash with an unhandled TypeError, surfacing as an opaque 500
+        # instead of a clean, actionable 400. Reject it here, before
+        # dispatch, rather than relying on every downstream helper to guard
+        # itself. `str`/`dict` are left alone -- `reversed()` already
+        # accepts a string (naturally yielding no user-role messages, since
+        # each "message" is then a single character), and Python dicts have
+        # supported `reversed()` since 3.8 -- neither shape crashes today, so
+        # this does not change existing behavior for them.
+        messages = body.get("messages")
+        if messages is not None and not isinstance(messages, (list, str, dict)):
+            raise RouterError(400, "`messages` must be a list", param="messages")
         stream = bool(body.get("stream", False))
         user = body.get("user")
         sticky_key = user if isinstance(user, str) and user else None
@@ -487,20 +505,6 @@ class RouterHandler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def _relay_stream(self, opened, result=None) -> None:
-        # Content-Type is the *router's* contract with the client (it chose
-        # this code path because the client asked for `stream: true`), not
-        # whatever the backend happened to send -- both real backends always
-        # send text/event-stream for a streamed request (verified against
-        # trailbrake's `_start_event_stream` and iliria's SSE path), but a proxy
-        # should assert its own promise rather than parrot an upstream header
-        # for something this significant to how the client parses the body.
-        self.send_response(opened.status)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Transfer-Encoding", "chunked")
-        self._emit_routing_headers(result)
-        self._send_cors_headers()
-        self.end_headers()
         outcome = StreamOutcome.SUCCESS
         # A rolling tail of what has been relayed so far, purely so
         # _extract_stream_usage_telemetry has something to scan once the
@@ -517,44 +521,75 @@ class RouterHandler(BaseHTTPRequestHandler):
         # OWN decision-log telemetry, it does not gate what the client sees.
         tail_buffer = b""
         try:
-            while True:
-                try:
-                    chunk = opened.read_chunk(65536)
-                except Exception:  # noqa: BLE001 -- any upstream read/protocol failure
-                    # The backend read raised FIRST -> a mid-stream backend
-                    # interruption (not a client problem). A clean end-of-body
-                    # returns b"" (handled below), never an exception.
-                    outcome = StreamOutcome.BACKEND_FAILURE
-                    self.close_connection = True
-                    break
-                if not chunk:
-                    break  # clean EOF on a chunked SSE stream = clean completion
-                tail_buffer = (tail_buffer + chunk)[-_SSE_TELEMETRY_TAIL_WINDOW_BYTES:]
-                try:
-                    self._write_stream_data(chunk)
-                except OSError:
-                    # Our write to the client failed FIRST -> the client aborted;
-                    # the backend is healthy, so leave its breaker untouched.
-                    # Caught as the broad `OSError` (not just BrokenPipeError/
-                    # ConnectionResetError): a client that stops reading
-                    # without dropping the connection stalls this write until
-                    # the socket timeout fires a plain `TimeoutError`, which
-                    # IS an OSError but is not either of those two specific
-                    # subclasses -- narrower catches here let a slow-reading
-                    # client's TimeoutError escape uncaught, which unwound
-                    # past this handler's own error path and attempted a
-                    # second, protocol-invalid response on a connection
-                    # already mid-stream (see the audit's DoS finding).
-                    outcome = StreamOutcome.CLIENT_ABORT
-                    self.close_connection = True
-                    break
-            if outcome is StreamOutcome.SUCCESS:
-                try:
-                    self.wfile.write(b"0\r\n\r\n")
-                    self.wfile.flush()
-                except OSError:  # see the broad-catch note above
-                    outcome = StreamOutcome.CLIENT_ABORT
-                    self.close_connection = True
+            try:
+                # Content-Type is the *router's* contract with the client (it
+                # chose this code path because the client asked for `stream:
+                # true`), not whatever the backend happened to send -- both
+                # real backends always send text/event-stream for a streamed
+                # request (verified against trailbrake's `_start_event_stream`
+                # and iliria's SSE path), but a proxy should assert its own
+                # promise rather than parrot an upstream header for something
+                # this significant to how the client parses the body.
+                self.send_response(opened.status)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Transfer-Encoding", "chunked")
+                self._emit_routing_headers(result)
+                self._send_cors_headers()
+                self.end_headers()
+            except OSError:
+                # The client is already gone (BrokenPipeError/
+                # ConnectionResetError writing the status line/headers, or a
+                # slow-reading client's plain TimeoutError -- see the
+                # broad-OSError note below) before this backend was ever
+                # read from. The backend is healthy and did no work for this
+                # attempt, so this is a CLIENT_ABORT, not a backend failure --
+                # it must not trip the breaker. `opened`/`finalize_stream`
+                # are still handled uniformly by the `finally` below, exactly
+                # like every other exit from this method, so the backend
+                # connection is never leaked and a HALF_OPEN trial this
+                # attempt may have claimed is always released.
+                outcome = StreamOutcome.CLIENT_ABORT
+                self.close_connection = True
+            else:
+                while True:
+                    try:
+                        chunk = opened.read_chunk(65536)
+                    except Exception:  # noqa: BLE001 -- any upstream read/protocol failure
+                        # The backend read raised FIRST -> a mid-stream backend
+                        # interruption (not a client problem). A clean end-of-body
+                        # returns b"" (handled below), never an exception.
+                        outcome = StreamOutcome.BACKEND_FAILURE
+                        self.close_connection = True
+                        break
+                    if not chunk:
+                        break  # clean EOF on a chunked SSE stream = clean completion
+                    tail_buffer = (tail_buffer + chunk)[-_SSE_TELEMETRY_TAIL_WINDOW_BYTES:]
+                    try:
+                        self._write_stream_data(chunk)
+                    except OSError:
+                        # Our write to the client failed FIRST -> the client aborted;
+                        # the backend is healthy, so leave its breaker untouched.
+                        # Caught as the broad `OSError` (not just BrokenPipeError/
+                        # ConnectionResetError): a client that stops reading
+                        # without dropping the connection stalls this write until
+                        # the socket timeout fires a plain `TimeoutError`, which
+                        # IS an OSError but is not either of those two specific
+                        # subclasses -- narrower catches here let a slow-reading
+                        # client's TimeoutError escape uncaught, which unwound
+                        # past this handler's own error path and attempted a
+                        # second, protocol-invalid response on a connection
+                        # already mid-stream (see the audit's DoS finding).
+                        outcome = StreamOutcome.CLIENT_ABORT
+                        self.close_connection = True
+                        break
+                if outcome is StreamOutcome.SUCCESS:
+                    try:
+                        self.wfile.write(b"0\r\n\r\n")
+                        self.wfile.flush()
+                    except OSError:  # see the broad-catch note above
+                        outcome = StreamOutcome.CLIENT_ABORT
+                        self.close_connection = True
         finally:
             opened.close()
             # Single-shot: record the stream's real breaker outcome now that the
@@ -565,7 +600,13 @@ class RouterHandler(BaseHTTPRequestHandler):
             # event already sitting in `tail_buffer`, and a malformed/partial
             # tail just yields `{}` (see _extract_stream_usage_telemetry's
             # docstring), so there is no failure mode here worth special-
-            # casing away.
+            # casing away. This also covers a failure in the header-write
+            # phase above (`opened` was never read from, `tail_buffer` is
+            # still `b""`) -- `opened.close()` and `finalize_stream` must run
+            # for that exit too, not just a mid-body one, so a backend's
+            # connection is never leaked and its breaker (including a
+            # HALF_OPEN trial this attempt may have claimed) is never left
+            # permanently wedged.
             if result is not None and result.finalize_stream is not None:
                 result.finalize_stream(outcome, _extract_stream_usage_telemetry(tail_buffer))
 

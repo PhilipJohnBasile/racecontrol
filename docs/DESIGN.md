@@ -474,6 +474,27 @@ silently inert with no signal that it's doing nothing.
    assert this directly. A typo in a panicked emergency edit must never be
    what actually takes the router down.
 
+**These two mechanisms are not fully independent: a reload resets breaker
+state.** `reload_from_path` rebuilds the whole `RequestRouter` -- including a
+brand-new `CircuitBreakerRegistry` -- from the freshly-loaded config
+(`server._build_components`); it does not carry forward any existing
+breaker's state. `tests/test_reload.py`'s
+`test_reload_rebuilds_router_and_telemetry_together` pins this down as
+current, intended behavior, not a regression to fix casually. The operator-
+facing consequence: a SIGHUP reload for *any* reason -- even one completely
+unrelated to the backend in question -- silently re-admits a backend the
+automatic circuit breaker had OPEN, before its `reset_after_s` window would
+otherwise have elapsed. Concretely: backend X trips OPEN at T=0 after
+`failure_threshold` consecutive failures; at T=10s (well inside the default
+60s `reset_after_s`) an operator reloads the config to bump an unrelated
+canary weight; the reload succeeds, and the very next request that would
+route to X is dispatched to it again, X's prior failure streak forgotten.
+Operators should be aware that a routine reload can undo the automatic
+rollback's exclusion of a currently-unhealthy backend -- if a backend is
+known to be actively failing, prefer `enabled = false` (or `weight = 0`) for
+that specific backend in the same edit that triggers the reload, rather than
+relying on the breaker's state to survive it.
+
 `config.py`'s own load-time validation is the guardrail that makes "the
 pruned model with no fallback" **unrepresentable**, not just discouraged:
 `_validate` refuses to load any config where a tier has no *enabled*

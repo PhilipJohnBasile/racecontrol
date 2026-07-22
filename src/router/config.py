@@ -23,6 +23,21 @@ from .errors import ConfigError
 
 DEFAULT_CORS_ORIGINS: tuple[str, ...] = ("http://127.0.0.1:5173", "http://localhost:5173")
 DEFAULT_HARD_MARKERS: tuple[str, ...] = ("#deep", "#reason", "/escalate")
+# `BackendConfig.role` values this project actually uses. The routing engine
+# itself only ever branches on the literal string "candidate" --
+# dispatch.py's `canary = backend.role == "candidate"` and backends.py's
+# `length_routing_excluded_ids` both compare against it, and everything else
+# is simply "not the candidate arm." "primary" (this dataclass's own default,
+# for a tier with no candidate at all) and "baseline" (the shipped example
+# config's/test suite's convention for the non-candidate arm of a tier that
+# *does* have a candidate, e.g. "trailbrake-baseline") are both just
+# descriptive labels for that -- so all three, not just "candidate", are
+# accepted here. Still kept as an explicit allow-list (not "any string"),
+# for the same reason as `LENGTH_ROUTING_ESTIMATORS` below: a typo'd `role`
+# (e.g. "Candidate", "canidate") must fail loudly at load time, not silently
+# load as an uncategorized backend that never gets classified as a canary
+# and never gets the length-routing guard-rail applied to it.
+BACKEND_ROLES: frozenset[str] = frozenset({"primary", "baseline", "candidate"})
 # Estimators `LengthRoutingConfig.estimator` may name -- see backends.py's
 # `estimate_prompt_tokens`. Just one today; kept as an explicit allow-list
 # (not "any string") so a typo'd config value fails loudly at load time
@@ -74,6 +89,10 @@ class BackendConfig:
             raise ConfigError(f"backend {self.id!r}: base_url must start with http:// or https://")
         if self.connect_timeout_s <= 0 or self.idle_timeout_s <= 0:
             raise ConfigError(f"backend {self.id!r}: timeouts must be > 0")
+        if self.role not in BACKEND_ROLES:
+            raise ConfigError(
+                f"backend {self.id!r}: role {self.role!r} is not one of {sorted(BACKEND_ROLES)}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
