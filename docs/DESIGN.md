@@ -226,8 +226,9 @@ rather than glossed over.
 
 ### The core argument for the trigger order
 
-Escalating to iliria on a false positive is far more expensive (~1.6 tok/s,
-streamed, potentially minutes for a long answer) than staying on trailbrake on a
+Escalating to iliria on a false positive is far more expensive (measured
+0.2 tok/s under GPU contention, ~1.5 warm and isolated -- see
+iliria-fm/bench/RESULTS.md; potentially minutes for a long answer) than staying on trailbrake on a
 false negative (trailbrake is fast enough -- ~15-25 tok/s -- that a wrong
 "stay fast" guess just costs a mediocre answer, not a stalled one). That
 asymmetry is why the shipped default policy (`policy.DefaultPolicy`) checks
@@ -247,19 +248,36 @@ in this order:
    language, architecture-trade-off language) weighed against a small set
    of boilerplate-signal patterns that pull the score back down (rename,
    typo/lint, "write a test for"), clamped to `[0, 1]` and compared against
-   `heuristic_threshold` (default `0.6`).
+   `heuristic_threshold` (default `0.7`; raised from `0.6` on 2026-07-22 --
+   see the measurement below).
 4. **Default tier** (`"fast"`) -- the common case, zero added latency.
 
-**Honesty about trigger 3.** This is a v0, pattern-matched signal, not a
-learned classifier, and it is the least reliable trigger in the set --
-`tests/test_policy.py`'s `HardnessScoreTests` pins down its current
-behavior (ordinary requests score low, explicit debugging/proof language
-scores high, boilerplate language pulls the score down, non-string/missing
-content never crashes it) but does **not** claim it generalizes well beyond
-those patterns. It is deliberately placed *last*, behind the two
-near-zero-false-positive triggers, and it is the trigger most worth
-replacing first (with a small learned classifier, or simply a larger/tuned
-pattern set) as real traffic is observed through telemetry.
+**Honesty about trigger 3 -- now measured, not just suspected.** This is a
+v0, pattern-matched signal, not a learned classifier, and it is the least
+reliable trigger in the set -- `tests/test_policy.py`'s `HardnessScoreTests`
+pins down its current behavior but does **not** claim it generalizes.
+
+In July 2026 it was measured against an 84-case held-out prompt set built
+*blind* to the pattern table (42 hard / 42 easy, including adversarial
+near-misses; committed under `bench/escalation_eval/`). Result at the old
+0.6 threshold: **0 of 42 hard prompts escalated, and all 3 escalations it
+did produce were false positives** -- trivial requests that mentioned a
+scary word ("document our deadlock postmortem template"). Precision 0.000,
+recall 0.000. Two independently proposed vocabulary extensions were
+measured on the same set and both made it *worse* under the cost asymmetry
+above (best case: 12 new catches bought with 5 new false escalations, plus
+a multi-turn escalation latch the single-turn metrics hid). Raising the
+threshold to 0.7 removed all three false positives at zero recall cost --
+which is another way of saying the heuristic at default config is
+effectively inert, and **escalation in practice is triggers 1-2**. That is
+a deliberate, measured position, not an oversight: a trigger whose only
+observed behavior is false escalation to a ~100x-cost tier earns a
+threshold it cannot reach on a single pattern. Caveats recorded in
+`bench/escalation_eval/RESULTS.md` (LLM-authored prompts, 50/50 class
+balance, n=84). It remains the trigger most worth replacing (small learned
+classifier, or patterns re-derived from *real* escalation-worthy traffic
+observed via telemetry) -- but extensions must now beat the committed
+held-out set, not just look plausible.
 
 ### `enable_task_heuristic = false` and `policy = "<tier name>"`
 

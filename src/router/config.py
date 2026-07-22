@@ -104,7 +104,12 @@ class EscalationConfig:
     default_tier: str = "fast"
     escalation_tier: str = "deep"
     hard_markers: tuple[str, ...] = DEFAULT_HARD_MARKERS
-    heuristic_threshold: float = 0.6
+    # 0.7, not 0.6: measured on an 84-case blind held-out set (bench/escalation_eval/),
+    # the 0.6 default escalated 3 times -- all false positives -- and caught 0 of 42
+    # genuinely hard prompts. At 0.7 those false escalations disappear at zero recall
+    # cost, so the threshold strictly dominates. Escalation in practice comes from
+    # triggers 1-2 (manual override, explicit markers); see DESIGN.md section 4.
+    heuristic_threshold: float = 0.7
     enable_task_heuristic: bool = True
     enable_draft_then_escalate: bool = False
 
@@ -277,7 +282,7 @@ def parse_config(raw: dict) -> RouterConfig:
         default_tier=escalation_raw.get("default_tier", "fast"),
         escalation_tier=escalation_raw.get("escalation_tier", "deep"),
         hard_markers=tuple(escalation_raw.get("hard_markers", DEFAULT_HARD_MARKERS)),
-        heuristic_threshold=float(escalation_raw.get("heuristic_threshold", 0.6)),
+        heuristic_threshold=float(escalation_raw.get("heuristic_threshold", 0.7)),
         enable_task_heuristic=bool(escalation_raw.get("enable_task_heuristic", True)),
         enable_draft_then_escalate=bool(escalation_raw.get("enable_draft_then_escalate", False)),
     )

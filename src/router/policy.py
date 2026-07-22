@@ -53,12 +53,26 @@ _HIGH_EFFORT = {"high", "xhigh"}
 # have once this pattern matches, no matter how many `_EASY_SIGNAL_PATTERNS`
 # also match. Without it the heuristic is purely additive, so a strong,
 # unambiguous signal like "deadlock" (0.4, already the highest weight here)
-# can be dragged back under `heuristic_threshold`'s 0.6 default by ordinary
-# boilerplate wording -- e.g. "write a unit test for this deadlock" scored
-# 0.4 - 0.2 = 0.2. Only the two highest-precision patterns (a named
-# concurrency/memory failure, or "why does X fail/crash/hang") get a floor;
-# the fuzzier hard signals below (design trade-offs, "think carefully", ...)
-# are common enough in ordinary requests that they stay purely additive.
+# can be dragged back under the escalation threshold by ordinary boilerplate
+# wording -- e.g. "write a unit test for this deadlock" scored 0.4 - 0.2 =
+# 0.2. Only the two highest-precision patterns (a named concurrency/memory
+# failure, or "why does X fail/crash/hang") get a floor; the fuzzier hard
+# signals below (design trade-offs, "think carefully", ...) are common
+# enough in ordinary requests that they stay purely additive.
+#
+# Measured honesty (2026-07-22, bench/escalation_eval/): on an 84-case blind
+# held-out set, every escalation this table produced at the old 0.6 default
+# threshold was a false positive (3/3 -- all trivial requests that merely
+# *mentioned* a scary word, e.g. "add a unit test for the race condition we
+# already fixed", where the floor overrode the easy signal built to catch
+# exactly that), and it caught 0 of 42 genuinely hard prompts. The default
+# threshold is now 0.7 (config.py), which a bare floored match (0.600) does
+# not clear -- so at default config, escalation comes from explicit markers
+# and manual overrides, and this table only fires on multi-pattern prompts.
+# Two independently proposed vocabulary extensions were measured net-negative
+# on the same set (recall bought at 100x-cost false positives, plus a
+# multi-turn escalation latch) -- see bench/escalation_eval/RESULTS.md before
+# adding patterns here.
 _HARD_SIGNAL_FLOOR = 0.6
 
 _HARD_SIGNAL_PATTERNS: tuple[tuple[re.Pattern[str], float, float], ...] = (
@@ -82,11 +96,14 @@ _EASY_SIGNAL_PATTERNS: tuple[tuple[re.Pattern[str], float], ...] = (
 # means a hard opening question ("why does this deadlock intermittently?")
 # followed by a terse in-context follow-up ("ok, also add a test for that")
 # scores the follow-up alone and drops straight back to the fast tier -- see
-# docs/DESIGN.md / the audit's "Escalation policy" section. `_TURN_DECAY` is
+# docs/DESIGN.md / the audit's "Escalation policy" section. `_TURN_DECAY` was
 # chosen so one turn back from a floored hard signal (0.8 raw) still
-# comfortably clears the 0.6 default threshold (0.8 * 0.8 = 0.64), while two
-# turns back (0.8 * 0.64 = 0.512) lets it fall back to normal -- a short
-# memory, not a permanent escalation latch.
+# comfortably cleared the then-default 0.6 threshold (0.8 * 0.8 = 0.64),
+# while two turns back (0.8 * 0.64 = 0.512) let it fall back to normal -- a
+# short memory, not a permanent escalation latch. (That arithmetic predates
+# the current 0.7 default threshold, under which a floored signal alone does
+# not escalate on any turn; the decay still bounds how long multi-pattern
+# scores persist. Measured context: bench/escalation_eval/RESULTS.md.)
 _RECENT_TURNS = 3
 _TURN_DECAY = 0.8
 

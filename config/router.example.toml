@@ -32,7 +32,13 @@ policy = "default"           # "default" | a tier name (pins all traffic to it)
 default_tier = "fast"
 escalation_tier = "deep"
 hard_markers = ["#deep", "#reason", "/escalate"]
-heuristic_threshold = 0.6    # hardness_score() >= this escalates; see policy.py
+heuristic_threshold = 0.7    # hardness_score() >= this escalates; see policy.py.
+                             # Raised from 0.6 (2026-07-22): on an 84-case blind
+                             # held-out set the 0.6 default produced 3 escalations,
+                             # all false, and caught 0/42 hard prompts -- 0.7 removes
+                             # the false escalations at zero recall cost. Receipts:
+                             # bench/escalation_eval/. Escalate via #deep/#reason or
+                             # reasoning_effort=high, which work regardless.
 enable_task_heuristic = true
 enable_draft_then_escalate = false   # off: no verifier wired in yet, see docs/DESIGN.md
 

@@ -297,8 +297,11 @@ class DefaultPolicyTests(unittest.TestCase):
     def test_hard_opening_turn_keeps_terse_followup_escalated(self):
         # Regression for the audit's exact scenario: "scoring only the last
         # user message will route a hard initial task to deep and a terse
-        # follow-up back to fast."
-        config = _config()
+        # follow-up back to fast." Pins threshold=0.6, the value the decay
+        # arithmetic was calibrated against (0.8 raw * 0.8 decay = 0.64):
+        # this tests the cross-turn decay mechanism, not the shipped default
+        # (0.7 -- measured rationale in bench/escalation_eval/).
+        config = _config(heuristic_threshold=0.6)
         policy = DefaultPolicy()
         messages = [
             {"role": "user", "content": "Why does this crash intermittently? Smells like a race condition."},
@@ -308,6 +311,20 @@ class DefaultPolicyTests(unittest.TestCase):
         decision = policy.decide({"messages": messages}, config)
         self.assertEqual(decision.tier, "deep")
         self.assertEqual(decision.trigger, "task_heuristic")
+
+    def test_bare_floor_signal_stays_fast_at_the_shipped_default(self):
+        # The shipped default threshold is 0.7, which a lone floored pattern
+        # (0.600) deliberately does not clear: on the 84-case blind held-out
+        # set (bench/escalation_eval/) every 0.6-threshold escalation was a
+        # false positive and no hard prompt was caught, so a single scary
+        # keyword must not buy a ~100x-cost deep-tier turn on its own.
+        config = _config()  # shipped defaults, threshold 0.7
+        policy = DefaultPolicy()
+        decision = policy.decide(
+            {"messages": _messages("There is a deadlock in the connection pool.")}, config
+        )
+        self.assertEqual(decision.tier, "fast")
+        self.assertEqual(decision.trigger, "default")
 
 
 class AlwaysTierPolicyTests(unittest.TestCase):

@@ -47,13 +47,14 @@ class _Harness:
 
     def __init__(self, backends: tuple[BackendConfig, ...], *, policy=None, fallback=None,
                 failure_threshold: int = 3, reset_after_s: float = 60.0,
-                length_routing: LengthRoutingConfig | None = None):
+                length_routing: LengthRoutingConfig | None = None,
+                escalation: EscalationConfig | None = None):
         self.tempdir = tempfile.TemporaryDirectory()
         self.transports: dict[str, FakeTransport] = {b.id: FakeTransport() for b in backends}
         clients = {b.id: BackendClient(b, transport=self.transports[b.id]) for b in backends}
         self.config = RouterConfig(
             server=ServerConfig(log_path=str(Path(self.tempdir.name) / "decisions.jsonl")),
-            escalation=EscalationConfig(),
+            escalation=escalation or EscalationConfig(),
             circuit_breaker=CircuitBreakerConfig(failure_threshold=failure_threshold, reset_after_s=reset_after_s),
             backends=backends,
             fallback=fallback or {},
@@ -1301,14 +1302,28 @@ class ConflictingRoutingSignalTests(unittest.TestCase):
 
     def test_hardness_score_exactly_at_the_threshold_escalates(self):
         # `>=`, not `>`, in policy.DefaultPolicy.decide -- on an
-        # exact-boundary ambiguous score (0.60 == the default threshold, see
-        # "big-O" + "step by step" each weighing 0.3), the router leans
-        # toward escalating rather than away from it.
-        self.harness.transports["iliria"].queue_response(200, chat_response_body("deep answer"))
-        message = "Explain the big-O complexity here, step by step."
-        result = self.harness.router.dispatch_chat({"messages": [{"role": "user", "content": message}]})
-        self.assertEqual(result.decision.trigger, "task_heuristic")
-        self.assertEqual(result.backend_id, "iliria")
+        # exact-boundary ambiguous score (0.60, see "big-O" + "step by step"
+        # each weighing 0.3), the router leans toward escalating rather than
+        # away from it. The threshold is pinned to 0.6 explicitly: this tests
+        # the boundary comparison, not the shipped default (which is 0.7 --
+        # measured rationale in bench/escalation_eval/ -- and which this
+        # 0.60-scoring message deliberately no longer clears).
+        harness = _Harness(
+            (
+                _backend(id="trailbrake-baseline", tier="fast"),
+                _backend(id="iliria", tier="deep", model_id="glm-5.2-iliria", rollback_target=True),
+            ),
+            fallback={"fast": "deep", "deep": "fast"},
+            escalation=EscalationConfig(heuristic_threshold=0.6),
+        )
+        try:
+            harness.transports["iliria"].queue_response(200, chat_response_body("deep answer"))
+            message = "Explain the big-O complexity here, step by step."
+            result = harness.router.dispatch_chat({"messages": [{"role": "user", "content": message}]})
+            self.assertEqual(result.decision.trigger, "task_heuristic")
+            self.assertEqual(result.backend_id, "iliria")
+        finally:
+            harness.close()
 
 
 class OversizedSignalTests(unittest.TestCase):
