@@ -1,0 +1,124 @@
+# racecontrol example configuration.
+#
+# Two tiers: "fast" (trailbrake) and "deep" (iliria). The routing engine itself
+# never hardcodes these names -- see docs/DESIGN.md -- but the escalation
+# and fallback sections below must name tiers that at least one [[backends]]
+# entry declares (config.py validates this at load time).
+#
+# Copy this file to router.toml, point base_url at wherever
+# `trailbrake serve` / iliria's `run-m5max-serve.sh` actually listen, and
+# adjust weights/policy. `racecontrol check-config --config
+# router.toml` validates without starting the server.
+
+[server]
+host = "127.0.0.1"
+port = 8100
+api_key = ""                 # required if host is ever not loopback (see docs/DESIGN.md)
+cors_origins = ["http://127.0.0.1:5173", "http://localhost:5173"]
+log_path = "var/decisions.jsonl"
+# X-Router-Backend/-Tier/-Canary/-Trigger/-Fallback-From response headers.
+# OFF by default so a pruned-vs-dense canary A/B stays blind (a client that
+# can read its own arm off the response can dodge/target it, and the same
+# headers hand an attacker an escalation-policy injection-tuning oracle).
+# X-Router-Request-Id (a correlation id, not routing metadata) is always
+# sent regardless, and the full attribution always lands in `log_path`
+# above -- offline outcome-attribution/shadow-eval joins on that, not on
+# these headers. Only turn this on for a trusted/debug deployment that
+# needs the header on the wire itself.
+expose_routing_headers = false
+
+[escalation]
+policy = "default"           # "default" | a tier name (pins all traffic to it)
+default_tier = "fast"
+escalation_tier = "deep"
+hard_markers = ["#deep", "#reason", "/escalate"]
+heuristic_threshold = 0.6    # hardness_score() >= this escalates; see policy.py
+enable_task_heuristic = true
+enable_draft_then_escalate = false   # off: no verifier wired in yet, see docs/DESIGN.md
+
+[length_routing]
+# Length-aware arm routing: a guard-rail for a tier's drafter-candidate arm
+# (role = "candidate" below), not a promoter. Measured 2026-07-20: the
+# drafter's speedup over dense decays with prompt length (1.35x at ~4K
+# prompt tokens -> 0.98x/1.01x at ~6.1K/7.3K; acceptance rate 0.708 -> 0.315
+# median over the same range) -- a blind weighted canary draw cannot see
+# prompt length, so it keeps sending the drafter exactly where it has
+# already measured a loss. See docs/DESIGN.md's "Length-aware routing"
+# section for the full mechanism.
+#
+# OPT-IN, ships dark: leave `enabled = false` until a real
+# acceptance-rate-vs-length dataset justifies a threshold for THIS
+# deployment's drafter/backend pairing. Below threshold_tokens, nothing
+# changes (the candidate keeps its configured `weight` share of the normal
+# draw, above). At/above threshold_tokens, the candidate is excluded from
+# selection for that request -- dense/baseline-only, including for an
+# otherwise-sticky `user` key (correctness beats stickiness here).
+# Enable this with kind_aware = true to let a prompt-kind classifier pick
+# a per-kind gate.
+enabled = false
+threshold_tokens = 4096      # provisional, from an early 7-pair measurement -- see docs/DESIGN.md
+estimator = "chars_div4"     # tokenizer-free: sum(message content chars) / 4, ~15%-ish error band
+kind_aware = false
+kind_thresholds = { generative = 4096, retrieval = 8192, multiturn = 4096, unknown = 4096 }
+
+[circuit_breaker]
+failure_threshold = 3        # consecutive failures before a backend opens
+reset_after_s = 60.0         # how long before one half-open trial request
+
+# fast <-> deep is intentionally symmetric: trailbrake erroring escalates to
+# iliria; iliria erroring (or its bounded request queue rejecting) falls
+# back to trailbrake-baseline rather than hard-failing the request.
+[fallback]
+fast = "deep"
+deep = "fast"
+
+# -- trailbrake tier ("fast") --------------------------------------------------
+
+[[backends]]
+id = "trailbrake-baseline"
+tier = "fast"
+base_url = "http://127.0.0.1:8080"     # `trailbrake serve --model <unmodified checkpoint> --port 8080`
+model_id = "default"                    # trailbrake aliases "default" to whatever it loaded
+weight = 100
+enabled = true
+role = "baseline"
+rollback_target = true                  # the required known-good default for this tier
+connect_timeout_s = 5.0
+idle_timeout_s = 30.0
+
+# The pruning-sweep candidate. Disabled and zero-weighted until the sweep
+# (bench/layer_skip/run_sweep.py in trailbrake) picks a Pareto point
+# and a human deliberately raises `weight`/`enabled=true` -- see
+# docs/DESIGN.md's canary section. Runs on its own port because
+# TB_SKIP_LAYERS is a process-launch-time env var, not a per-request
+# parameter (trailbrake/src/mlx_engine/config.py) -- the candidate
+# and baseline must be two separate `trailbrake serve` processes.
+[[backends]]
+id = "trailbrake-candidate"
+tier = "fast"
+base_url = "http://127.0.0.1:8081"      # TB_SKIP_LAYERS=<sweep winner> trailbrake serve --port 8081
+model_id = "default"
+weight = 0
+enabled = false
+role = "candidate"
+rollback_target = false
+connect_timeout_s = 5.0
+idle_timeout_s = 30.0
+
+# -- iliria tier ("deep") ------------------------------------------------
+
+[[backends]]
+id = "iliria"
+tier = "deep"
+base_url = "http://127.0.0.1:8000"      # run-m5max-serve.sh's `ili serve` / openai_server.py
+model_id = "glm-5.2-iliria"             # must match iliria's --model-id exactly (check_model())
+api_key = ""                             # set if iliria was started with --api-key
+weight = 100
+enabled = true
+role = "primary"
+rollback_target = true
+connect_timeout_s = 5.0
+# Generous on purpose: ~1.6 tok/s streamed means a long escalation can
+# legitimately run minutes end to end. This bounds the gap between reads,
+# not the whole call -- see backends.py's "why two timeouts" note.
+idle_timeout_s = 120.0

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "racecontrol"
+version = "0.1.0"
+description = "Two-tier OpenAI-compatible router: trailbrake (fast default) with iliria (deep-reasoning escalation), canary + instant rollback + fallback + telemetry."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Philip John Basile" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.11"]
+
+[project.scripts]
+racecontrol = "router.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/router"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
