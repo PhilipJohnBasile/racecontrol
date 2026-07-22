@@ -3,6 +3,8 @@
 **The two-tier router that makes [trailbrake](https://github.com/PhilipJohnBasile/trailbrake)
 and iliria one usable product.**
 
+> **Family:** [iliria](https://github.com/PhilipJohnBasile/iliria) (deep) · [trailbrake](https://github.com/PhilipJohnBasile/trailbrake) (fast) · [iliria-fm](https://github.com/PhilipJohnBasile/iliria-fm) (Apple Foundation Models integration — including Apple's on-device/PCC models as router tiers).
+
 trailbrake (dense Qwen3-32B-4bit, ~15-25 tok/s, being pruned
 into a fast NO-THINK coding specialist) is the fast default. iliria
 (GLM-5.2, 744B MoE, ~1.6 tok/s streamed, in `iliria/c`) is the
