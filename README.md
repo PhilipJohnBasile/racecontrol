@@ -74,11 +74,15 @@ same `/v1/chat/completions` / `/v1/completions` / `/v1/models` surface as
 both backends, plus `GET /health` and `GET /router/status` for its own
 canary/circuit-breaker/decision-count state.
 
-**This repo intentionally never talks to a real model or a GPU.** Every test
-here mocks or scripts both backends. Wiring this router up to a live
-`trailbrake serve` and a live `ili serve` process is the GPU-gated
-integration step described in docs/DESIGN.md's last section -- it has not
-been run as part of this change.
+**This repo's test suite intentionally never talks to a real model or a
+GPU.** Every test here mocks or scripts both backends, so CI needs no
+hardware. The live integration -- this router in front of a real
+`trailbrake serve` and a real `ili serve` -- HAS since been run and
+benchmarked: attribution-verified rows for every tier are published in
+`iliria-fm/bench/RESULTS.md`, and that run also surfaced (and fixed) a real
+streaming bug in this repo's `backends.py` (`read` vs `read1` on chunked
+bodies). An earlier version of this paragraph said the integration step had
+not yet been run.
 
 ## Test
 
