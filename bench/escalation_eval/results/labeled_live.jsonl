@@ -1,0 +1,1 @@
+{"request_id": "rtr_300ad4feab5440b3a52fa4feb4d00ad5", "created_utc": "2026-07-22T22:54:24Z", "label_rule": "fast_enough_weak", "wanted_deep": false, "weak": true, "features": {"hardness_score": 0.0, "hard_hits": [], "easy_hits": [], "patterns_version": "bd2b263c", "prompt_fingerprint": "97e6a20344e1269d", "had_marker": false, "latest_chars": 7, "user_turns": 1}}

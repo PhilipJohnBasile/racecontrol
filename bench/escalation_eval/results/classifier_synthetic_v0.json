@@ -1,0 +1,38 @@
+{
+ "feature_names": [
+  "hardness_score",
+  "n_hard_hits",
+  "n_easy_hits",
+  "log1p_chars",
+  "user_turns"
+ ],
+ "weights": [
+  0.3839831768896377,
+  0.3839831768896377,
+  -0.702925355470698,
+  3.424814318777334,
+  0.0
+ ],
+ "bias": -0.4119581771242032,
+ "means": [
+  0.014214463840399002,
+  0.04738154613466334,
+  0.20199501246882792,
+  4.1699860687035555,
+  1.0
+ ],
+ "stds": [
+  0.06373608216583201,
+  0.21245360721944004,
+  0.4014885146633039,
+  0.5080125647828586,
+  1.0
+ ],
+ "trained_on": {
+  "real_labeled": 1,
+  "synthetic": 400,
+  "seed": 20260722,
+  "EXPERIMENTAL": true,
+  "note": "synthetic-trained models are distribution-shift bait; never a routing policy"
+ }
+}
